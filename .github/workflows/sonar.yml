@@ -1,0 +1,43 @@
+name: sonar
+
+# Kräver secret SONAR_TOKEN och Sonar-projektet shared-libs (skapas manuellt).
+# Körs bara på main och på PR från samma repo (secrets nås inte från forkar).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sonarqube:
+    name: SonarQube Scan
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      # Täckning samlas för alla paket; nya förmågor läggs till här.
+      - name: Täckning (py)
+        run: |
+          for d in py/*/; do
+            (cd "$d" && pip install -e ".[dev]" && pytest -q --cov=src --cov-report="xml:coverage.xml")
+          done
+      - name: Täckning (ts)
+        run: |
+          for d in ts/*/; do
+            (cd "$d" && npm ci && npm test)
+          done
+      - uses: SonarSource/sonarqube-scan-action@v8
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonar.jimlov.se

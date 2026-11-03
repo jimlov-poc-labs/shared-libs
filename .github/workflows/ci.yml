@@ -1,0 +1,99 @@
+name: ci
+
+# Säkerhetsnotering: ingen del av händelsens payload interpoleras i run:-rader.
+# Värden når steg bara via env:.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  andrade:
+    name: Berörda paket
+    runs-on: ubuntu-latest
+    outputs:
+      py: ${{ steps.detect.outputs.py }}
+      ts: ${{ steps.detect.outputs.ts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: detect
+        env:
+          BAS_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: .github/scripts/andrade-paket.sh
+
+  py:
+    name: py/${{ matrix.paket }}
+    needs: andrade
+    if: needs.andrade.outputs.py != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        paket: ${{ fromJSON(needs.andrade.outputs.py) }}
+    defaults:
+      run:
+        working-directory: py/${{ matrix.paket }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: py/${{ matrix.paket }}/pyproject.toml
+      - run: pip install -e ".[dev]"
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Typer (mypy strict)
+        run: mypy
+      - name: Test
+        run: pytest -q --cov=src --cov-report=xml:coverage.xml
+      - name: Kända sårbarheter (pip-audit)
+        run: |
+          pip freeze --exclude-editable > /tmp/krav.txt
+          pip install pip-audit==2.10.1
+          python -m pip_audit --progress-spinner off -r /tmp/krav.txt
+
+  ts:
+    name: ts/${{ matrix.paket }} (node ${{ matrix.node }})
+    needs: andrade
+    if: needs.andrade.outputs.ts != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        paket: ${{ fromJSON(needs.andrade.outputs.ts) }}
+        node: ["20", "22"]
+    defaults:
+      run:
+        working-directory: ts/${{ matrix.paket }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: ts/${{ matrix.paket }}/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - name: Kända sårbarheter (npm audit, körtidsberoenden)
+        run: npm audit --omit=dev --audit-level=low
+      - name: Kända sårbarheter (npm audit, utvecklingsberoenden, high)
+        run: npm audit --audit-level=high

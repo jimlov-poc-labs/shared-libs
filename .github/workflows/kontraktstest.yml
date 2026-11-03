@@ -1,0 +1,94 @@
+name: kontraktstest
+
+# SKISS, EJ AKTIV MOT RIKTIGA REPON. Se README, avsnittet Kontraktstest.
+# Idé: innan en ny förmågeversion taggas, kör konsumentens egna tester med
+# förmågan installerad från en given gren/tagg i detta repo.
+# Endast manuell trigger. Ingen konsument är registrerad än, så jobbet
+# stoppar om inga indata anges (fail closed).
+on:
+  workflow_dispatch:
+    inputs:
+      konsument_repo:
+        description: "Konsumentens repo, t.ex. jimlov-poc-labs/portis"
+        required: true
+        type: string
+      konsument_ref:
+        description: "Gren eller tagg i konsumenten"
+        required: true
+        default: main
+        type: string
+      sprak:
+        description: "py eller ts"
+        required: true
+        type: choice
+        options: [py, ts]
+      formaga:
+        description: "Förmågans mapp-namn, t.ex. proof"
+        required: true
+        type: string
+      kandidat_ref:
+        description: "Gren, tagg eller sha i shared-libs som ska provas"
+        required: true
+        type: string
+      testkommando:
+        description: "Konsumentens testkommando, t.ex. python -m pytest -q"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  kontrakt:
+    runs-on: ubuntu-latest
+    env:
+      # Konsumentrepot är privat och checkas ut med secret KONTRAKT_TOKEN (läsrätt,
+      # skapas manuellt, finns inte än). Kandidaten hämtas med jobbets egen token.
+      KONSUMENT_REPO: ${{ inputs.konsument_repo }}
+      KONSUMENT_REF: ${{ inputs.konsument_ref }}
+      SPRAK: ${{ inputs.sprak }}
+      FORMAGA: ${{ inputs.formaga }}
+      KANDIDAT_REF: ${{ inputs.kandidat_ref }}
+      TESTKOMMANDO: ${{ inputs.testkommando }}
+    steps:
+      - name: Kontrollera indata
+        run: |
+          [[ "$SPRAK" == "py" || "$SPRAK" == "ts" ]] || { echo "ogiltigt språk"; exit 1; }
+          [[ "$FORMAGA" =~ ^[a-z0-9_-]+$ ]] || { echo "ogiltigt förmågenamn"; exit 1; }
+          [[ "$KONSUMENT_REPO" =~ ^jimlov-poc-labs/[A-Za-z0-9._-]+$ ]] || { echo "bara repon i jimlov-poc-labs"; exit 1; }
+          [[ -n "$TESTKOMMANDO" && -n "$KANDIDAT_REF" ]] || { echo "tomma indata"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.konsument_repo }}
+          ref: ${{ inputs.konsument_ref }}
+          token: ${{ secrets.KONTRAKT_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: inputs.sprak == 'py'
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: inputs.sprak == 'ts'
+        with:
+          node-version: "22"
+      - name: Hämta kandidatversionen av shared-libs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.kandidat_ref }}
+          path: .shared-libs-kandidat
+          persist-credentials: false
+      - name: Installera kandidaten över konsumentens pinnade version
+        run: |
+          kand=".shared-libs-kandidat/${SPRAK}/${FORMAGA}"
+          [[ -d "$kand" ]] || { echo "förmågan finns inte i kandidaten"; exit 1; }
+          if [[ "$SPRAK" == "py" ]]; then
+            pip install -r requirements.txt 2>/dev/null || pip install -e ".[dev]"
+            pip install --force-reinstall --no-deps "$kand"
+          else
+            npm ci
+            (cd "$kand" && npm ci && npm run build && npm pack --pack-destination "$GITHUB_WORKSPACE/.kandidat")
+            npm install --no-save "$GITHUB_WORKSPACE"/.kandidat/*.tgz
+          fi
+      - name: Kör konsumentens tester
+        run: bash -c "$TESTKOMMANDO"
