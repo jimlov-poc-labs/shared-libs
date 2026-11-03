@@ -25,6 +25,20 @@ SRC = HERE / "src" / "ssrf_fetch"
 # (namn, fil, gammal text, ny text, antal träffar)
 MUTANTER: list[tuple[str, str, str, str, int]] = [
     (
+        "taket för samtidiga DNS-uppslag borttaget",
+        "url.py",
+        "    if not slots.acquire(blocking=False):",
+        "    if not slots.acquire(blocking=False) and False:",
+        1,
+    ),
+    (
+        "DNS-plats frigörs aldrig",
+        "url.py",
+        "        finally:\n            slots.release()\n",
+        "        finally:\n            pass\n",
+        1,
+    ),
+    (
         "IP-spärren avstängd",
         "address.py",
         "    if any(addr in n for n in networks):\n        return True\n    return not addr.is_global",  # noqa: E501

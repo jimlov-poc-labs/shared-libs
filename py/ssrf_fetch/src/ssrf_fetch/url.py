@@ -23,11 +23,25 @@ URL_PLACEHOLDER = "[url maskerad]"
 _HOST_CHARS = re.compile(r"[a-z0-9_.-]+")
 _SHOWN_HOSTPORT = re.compile(r"[A-Za-z0-9_.:\[\]-]+")
 _MAX_SHOWN_PATH = 200
+DEFAULT_MAX_CONCURRENT_LOOKUPS = 32
+_dns_slots = threading.BoundedSemaphore(DEFAULT_MAX_CONCURRENT_LOOKUPS)
+
+
+def set_max_concurrent_lookups(limit: int) -> None:
+    """Sätter taket för samtidiga namnuppslag i processen (standard 32). Uppslag som redan körs
+    behåller sin gamla plats. Ska anropas vid uppstart, före första hämtningen."""
+    global _dns_slots  # noqa: PLW0603
+    if limit < 1:
+        raise ValueError("limit måste vara minst 1")
+    _dns_slots = threading.BoundedSemaphore(limit)
 
 
 def redact_url(url: object) -> str:
     """URL i säkert visningsformat: schema, värd, port och sökväg. Aldrig användaruppgifter,
-    query eller fragment. Kan den inte tolkas ger den en fast platshållare (fail closed)."""
+    query eller fragment. Kan den inte tolkas ger den en fast platshållare (fail closed).
+
+    OBS: sökvägen behålls (högst 200 tecken). En token eller sessionsnyckel i själva sökvägen
+    (t.ex. `/reset/<token>` eller `;jsessionid=...`) kan därför synas i `Failed.url`."""
     if not isinstance(url, str) or len(url) > MAX_URL_LENGTH:
         return URL_PLACEHOLDER
     try:
@@ -51,9 +65,16 @@ def resolve_with_timeout(
     resolver: Resolver, host: str, port: int, timeout: float
 ) -> list[str] | Failed:
     """Kör resolvern i en egen tråd och ger upp efter `timeout`. getaddrinfo går inte att avbryta;
-    en hängd tråd är daemon och överges, men anroparen blockeras aldrig längre än `timeout`."""
+    en hängd tråd är daemon och överges, men anroparen blockeras aldrig längre än `timeout`.
+
+    Antalet samtidiga uppslagstrådar är begränsat av en semafor som tas utan att blockera. Är den
+    full ges felkoden timeout direkt. Platsen släpps först när uppslagstråden faktiskt är klar,
+    inte när anroparen ger upp, så hängda namnservrar kan inte ge obegränsat antal trådar."""
     if timeout <= 0:
         return Failed("", ErrorCode.TIMEOUT, "totaltiden är slut före namnupplösning")
+    slots = _dns_slots
+    if not slots.acquire(blocking=False):
+        return Failed("", ErrorCode.TIMEOUT, "för många pågående namnuppslag")
     box: list[list[str] | BaseException] = []
 
     def work() -> None:
@@ -61,9 +82,15 @@ def resolve_with_timeout(
             box.append(list(resolver(host, port)))
         except BaseException as error:  # noqa: BLE001 - allt ska tolkas som nekat
             box.append(error)
+        finally:
+            slots.release()
 
     thread = threading.Thread(target=work, daemon=True, name="ssrf-dns")
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        slots.release()
+        raise
     thread.join(timeout)
     if not box:
         return Failed("", ErrorCode.TIMEOUT, "namnupplösningen tog för lång tid")

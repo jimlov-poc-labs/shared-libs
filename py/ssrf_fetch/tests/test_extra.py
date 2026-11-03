@@ -26,7 +26,8 @@ from ssrf_fetch import (
     parse_robots,
     validate_url,
 )
-from ssrf_fetch.url import URL_PLACEHOLDER, redact_url
+from ssrf_fetch import url as url_module
+from ssrf_fetch.url import URL_PLACEHOLDER, redact_url, resolve_with_timeout
 
 PUB = "93.184.216.34"
 DNS = {"example.com": [PUB]}
@@ -535,6 +536,63 @@ def test_validate_url_dns_timeout_och_utgangen_tid() -> None:
         release.set()
     assert isinstance(slow, Failed) and slow.code is ErrorCode.TIMEOUT
     assert isinstance(expired, Failed) and expired.code is ErrorCode.TIMEOUT
+
+
+def _dns_threads() -> int:
+    return sum(1 for t in threading.enumerate() if t.name == "ssrf-dns")
+
+
+def test_dns_uppslag_har_tak_och_nekas_direkt_nar_fullt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(url_module, "_dns_slots", threading.BoundedSemaphore(3))
+    release = threading.Event()
+    before = _dns_threads()
+
+    def slow(host: str, port: int) -> list[str]:
+        release.wait(10)
+        return [PUB]
+
+    try:
+        results = [resolve_with_timeout(slow, "example.com", 80, 0.05) for _ in range(3)]
+        start = time.perf_counter()
+        extra = [resolve_with_timeout(slow, "example.com", 80, 5) for _ in range(20)]
+        elapsed = time.perf_counter() - start
+        assert _dns_threads() - before <= 3
+    finally:
+        release.set()
+    assert all(isinstance(r, Failed) and r.code is ErrorCode.TIMEOUT for r in results)
+    assert all(isinstance(r, Failed) and r.code is ErrorCode.TIMEOUT for r in extra)
+    assert elapsed < 1, elapsed
+
+
+def test_dns_platser_frigors_nar_tradarna_ar_klara(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(url_module, "_dns_slots", threading.BoundedSemaphore(2))
+    release = threading.Event()
+
+    def slow(host: str, port: int) -> list[str]:
+        release.wait(10)
+        return [PUB]
+
+    for _ in range(2):
+        assert isinstance(resolve_with_timeout(slow, "example.com", 80, 0.05), Failed)
+    full = resolve_with_timeout(FakeDns(DNS), "example.com", 80, 1)
+    assert isinstance(full, Failed) and full.code is ErrorCode.TIMEOUT
+    release.set()
+    deadline = time.monotonic() + 5
+    while _dns_threads() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    ok = resolve_with_timeout(FakeDns(DNS), "example.com", 80, 1)
+    assert ok == DNS["example.com"]
+
+
+def test_dns_plats_frigors_aven_nar_resolvern_kastar(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(url_module, "_dns_slots", threading.BoundedSemaphore(1))
+
+    def boom(host: str, port: int) -> list[str]:
+        raise OSError("nej")
+
+    for _ in range(3):
+        r = resolve_with_timeout(boom, "example.com", 80, 1)
+        assert isinstance(r, Failed) and r.code is ErrorCode.DNS_ERROR
 
 
 # --- Content-Length strikt ASCII ----------------------------------------------------------

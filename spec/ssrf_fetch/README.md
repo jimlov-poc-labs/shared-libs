@@ -48,6 +48,18 @@ rate_limited, internal_error.
 - `Failed.url` är maskerad: bara schema, värd, port och sökväg (högst 200 tecken). Aldrig
   användaruppgifter, query eller fragment. Går URL:en inte att tolka är den den fasta texten
   `[url maskerad]`. Detsamma gäller varje felsträng och loggrad. `Fetched.url` är oförändrad.
+  OBS: sökvägen behålls, så en token eller sessionsnyckel i själva sökvägen (t.ex.
+  `/reset/<token>`, `;jsessionid=...`) kan synas i `Failed.url`. Bara query, fragment och
+  userinfo maskeras.
+- Samtidiga namnuppslag har ett processgemensamt tak (standard 32, `set_max_concurrent_lookups`
+  i Python). Är taket nått ger nästa uppslag direkt `timeout` (ingen egen felkod). Platsen
+  släpps när uppslagstråden är klar, inte när anroparen ger upp, så en hängande namnserver kan
+  inte skapa obegränsat antal trådar.
+- Python: deadline-skyddet (absolut tid per läsning/skrivning/anslutning) sitter i en egen
+  httpcore-transport och går mot httpcores gränssnitt samt `transport._pool`; därför pinnas
+  `httpcore>=1.0,<2`. Skickar anroparen en egen `transport=` till `SafeFetcher` får den
+  inte deadline-skyddet (bara httpx:s vanliga per-läsning-timeouts); IP-pinning och övriga
+  spärrar gäller fortsatt.
 - Content-Length måste vara strikt ASCII-siffror (`[0-9]+`); annat ger `network_error`, och
   tal med över 18 siffror räknas som över taket (`too_large`) utan att tolkas.
 - Hastighetsgränsen (`HostLimiter`) är per normaliserat värdnamn, inte per IP-adress: två namn
