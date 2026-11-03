@@ -1,0 +1,32 @@
+# Veckovisa beroendeuppdateringar; minor och patch grupperas till en PR per ekosystem.
+# Lägg till ny katalog här när en förmåga skapas.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directories:
+      - "/py/_exempel"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directories:
+      - "/ts/_exempel"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]

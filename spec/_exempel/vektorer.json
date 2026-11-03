@@ -1,0 +1,19 @@
+{
+  "forman": "_exempel",
+  "beskrivning": "strikt_port: returnerar porten som heltal, eller null för allt som inte är ett decimalt heltal 1-65535 utan tecken, blanksteg eller nollutfyllnad. Fail closed.",
+  "fall": [
+    {"namn": "giltig", "in": "8080", "ut": 8080},
+    {"namn": "nedre gräns", "in": "1", "ut": 1},
+    {"namn": "övre gräns", "in": "65535", "ut": 65535},
+    {"namn": "noll", "in": "0", "ut": null},
+    {"namn": "för stor", "in": "65536", "ut": null},
+    {"namn": "tom", "in": "", "ut": null},
+    {"namn": "blanksteg", "in": " 80", "ut": null},
+    {"namn": "plustecken", "in": "+80", "ut": null},
+    {"namn": "negativ", "in": "-1", "ut": null},
+    {"namn": "nollutfylld", "in": "080", "ut": null},
+    {"namn": "bokstäver", "in": "80a", "ut": null},
+    {"namn": "decimal", "in": "80.0", "ut": null},
+    {"namn": "arabiska siffror", "in": "٨٠", "ut": null}
+  ]
+}
