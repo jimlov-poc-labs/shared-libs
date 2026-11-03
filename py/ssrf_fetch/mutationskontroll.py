@@ -82,8 +82,8 @@ MUTANTER: list[tuple[str, str, str, str, int]] = [
     (
         "schema-nedgradering tillåten",
         "fetcher.py",
-        '            if target.scheme == "https" and next_scheme == "http":',
-        "            if False:",
+        '    if scheme == "https" and next_scheme == "http":',
+        "    if False:",
         1,
     ),
     (
@@ -96,8 +96,8 @@ MUTANTER: list[tuple[str, str, str, str, int]] = [
     (
         "storlekstaket avstängt (Content-Length)",
         "fetcher.py",
-        "            if too_big and not truncate:",
-        "            if False:",
+        "    if too_big and not truncate:",
+        "    if False:",
         1,
     ),
     (
@@ -173,15 +173,15 @@ MUTANTER: list[tuple[str, str, str, str, int]] = [
     (
         "robots gäller inte hopp efter omdirigering",
         "fetcher.py",
-        "            if use_robots:\n                denial",
-        "            if use_robots and hop == 0:\n                denial",
+        "denial = self._robots_check(target, deadline, use_robots)",
+        "denial = self._robots_check(target, deadline, use_robots and hop == 0)",
         1,
     ),
     (
         "namngiven grupp med tom Disallow späds ut av jokern",
         "robots.py",
-        "tuple(named if named_seen else star)",
-        "tuple(named or star)",
+        "tuple(groups.named if groups.named_seen else groups.star)",
+        "tuple(groups.named or groups.star)",
         1,
     ),
     (
@@ -257,8 +257,8 @@ MUTANTER: list[tuple[str, str, str, str, int]] = [
     (
         "Content-Length: isdigit i stället för strikt ASCII",
         "fetcher.py",
-        "            if not _ASCII_DIGITS.fullmatch(declared):",
-        "            if not declared.isdigit():",
+        "    if not _ASCII_DIGITS.fullmatch(declared):",
+        "    if not declared.isdigit():",
         1,
     ),
     (
@@ -278,8 +278,8 @@ MUTANTER: list[tuple[str, str, str, str, int]] = [
     (
         "komprimerat svar accepteras",
         "fetcher.py",
-        '        if encoding not in ("", "identity"):',
-        "        if False:",
+        '    if encoding not in ("", "identity"):',
+        "    if False:",
         1,
     ),
     (

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
 from urllib.parse import urljoin, urlsplit
@@ -134,27 +134,25 @@ class SafeFetcher:
                 dns_timeout=deadline - self._clock(),
             )
             if isinstance(target, Failed):
-                return replace(target, url=shown)
-            if use_robots:
-                denial = self._robots_denial(target, deadline)
-                if denial is not None:
-                    return replace(denial, url=shown)
+                return _shown(target, shown)
+            denial = self._robots_check(target, deadline, use_robots)
+            if denial is not None:
+                return _shown(denial, shown)
             outcome = self._hop(target, deadline, max_bytes, truncate, content_types)
-            if isinstance(outcome, Failed):
-                return replace(outcome, url=shown)
-            if isinstance(outcome, Fetched):
-                return replace(outcome, url=url, final_url=current, redirects=hop)
+            if not isinstance(outcome, _Redirect):
+                return _finish(outcome, shown, url, current, hop)
             if hop >= cfg.max_redirects:
                 return Failed(shown, ErrorCode.TOO_MANY_REDIRECTS, f"fler än {cfg.max_redirects}")
-            try:
-                following = urljoin(current, outcome.location)
-                next_scheme = urlsplit(following).scheme.lower()
-            except ValueError:
-                return Failed(shown, ErrorCode.BAD_REDIRECT, "Location kunde inte tolkas")
-            if target.scheme == "https" and next_scheme == "http":
-                return Failed(shown, ErrorCode.REDIRECT_DOWNGRADE, "https till http nekas")
+            following = _follow(current, outcome.location, target.scheme, shown)
+            if isinstance(following, Failed):
+                return following
             current = following
         return Failed(shown, ErrorCode.TOO_MANY_REDIRECTS, f"fler än {cfg.max_redirects}")
+
+    def _robots_check(self, target: Target, deadline: float, use_robots: bool) -> Failed | None:
+        if not use_robots:
+            return None
+        return self._robots_denial(target, deadline)
 
     def _hop(
         self,
@@ -256,22 +254,21 @@ class SafeFetcher:
             return _Redirect(location)
         if not 200 <= status < 300:
             return Failed("", ErrorCode.HTTP_STATUS, f"HTTP {status}", status)
-
-        encoding = response.headers.get("content-encoding", "").strip().lower()
-        if encoding not in ("", "identity"):
-            return Failed("", ErrorCode.UNSUPPORTED_ENCODING, "komprimerat svar nekas", status)
+        rejection = _header_rejection(response.headers, status, content_types, max_bytes, truncate)
+        if rejection is not None:
+            return rejection
         content_type = response.headers.get("content-type", "")
-        if content_types is not None and not _type_allowed(content_type, content_types):
-            return Failed("", ErrorCode.CONTENT_TYPE_NOT_ALLOWED, "innehållstypen nekas", status)
-        declared = response.headers.get("content-length", "").strip()
-        if declared:
-            # Strikt ASCII: str.isdigit() godtar t.ex. "²" och int() kastar då.
-            if not _ASCII_DIGITS.fullmatch(declared):
-                return Failed("", ErrorCode.NETWORK_ERROR, "ogiltig Content-Length", status)
-            too_big = len(declared) > _MAX_LENGTH_DIGITS or int(declared) > max_bytes
-            if too_big and not truncate:
-                return Failed("", ErrorCode.TOO_LARGE, "Content-Length över taket", status)
+        return self._read_body(response, status, content_type, deadline, max_bytes, truncate)
 
+    def _read_body(
+        self,
+        response: httpx.Response,
+        status: int,
+        content_type: str,
+        deadline: float,
+        max_bytes: int,
+        truncate: bool,
+    ) -> Fetched | Failed:
         body = bytearray()
         truncated = False
         stream = response.stream
@@ -332,6 +329,69 @@ class SafeFetcher:
         return Failed(
             "", ErrorCode.ROBOTS_UNAVAILABLE, f"robots.txt kunde inte läsas ({result.code})"
         )
+
+
+def _header_rejection(
+    headers: httpx.Headers,
+    status: int,
+    content_types: frozenset[str] | None,
+    max_bytes: int,
+    truncate: bool,
+) -> Failed | None:
+    """Nekar på svarshuvudet (kodning, innehållstyp, längd) innan någon kropp läses."""
+    encoding = headers.get("content-encoding", "").strip().lower()
+    if encoding not in ("", "identity"):
+        return Failed("", ErrorCode.UNSUPPORTED_ENCODING, "komprimerat svar nekas", status)
+    content_type = headers.get("content-type", "")
+    if content_types is not None and not _type_allowed(content_type, content_types):
+        return Failed("", ErrorCode.CONTENT_TYPE_NOT_ALLOWED, "innehållstypen nekas", status)
+    return _length_rejection(headers.get("content-length", "").strip(), status, max_bytes, truncate)
+
+
+def _length_rejection(declared: str, status: int, max_bytes: int, truncate: bool) -> Failed | None:
+    if not declared:
+        return None
+    # Strikt ASCII: str.isdigit() godtar t.ex. "²" och int() kastar då.
+    if not _ASCII_DIGITS.fullmatch(declared):
+        return Failed("", ErrorCode.NETWORK_ERROR, "ogiltig Content-Length", status)
+    too_big = len(declared) > _MAX_LENGTH_DIGITS or int(declared) > max_bytes
+    if too_big and not truncate:
+        return Failed("", ErrorCode.TOO_LARGE, "Content-Length över taket", status)
+    return None
+
+
+def _shown(failed: Failed, shown: str) -> Failed:
+    """Samma fel men med den maskerade URL:en."""
+    return Failed(shown, failed.code, failed.detail, failed.http_status)
+
+
+def _finish(
+    outcome: Fetched | Failed, shown: str, url: str, current: str, hop: int
+) -> Fetched | Failed:
+    """Slutresultat för ett hopp: Failed får den maskerade URL:en, Fetched får hoppräkningen."""
+    if isinstance(outcome, Failed):
+        return _shown(outcome, shown)
+    return Fetched(
+        url,
+        current,
+        outcome.status,
+        outcome.content_type,
+        outcome.body,
+        outcome.truncated,
+        hop,
+    )
+
+
+def _follow(current: str, location: str, scheme: str, shown: str) -> str | Failed:
+    """Nästa URL efter en omdirigering, eller Failed (oläsbar Location, https till http)."""
+    try:
+        following = urljoin(current, location)
+        next_scheme = urlsplit(following).scheme.lower()
+    except ValueError:
+        return Failed(shown, ErrorCode.BAD_REDIRECT, "Location kunde inte tolkas")
+    if scheme == "https" and next_scheme == "http":
+        return Failed(shown, ErrorCode.REDIRECT_DOWNGRADE, "https till http nekas")
+    return following
 
 
 def _type_allowed(header: str, allowed: frozenset[str]) -> bool:
