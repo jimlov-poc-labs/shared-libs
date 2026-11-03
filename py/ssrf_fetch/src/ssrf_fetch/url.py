@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+import threading
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -17,7 +18,59 @@ from ssrf_fetch.address import (
 from ssrf_fetch.models import ErrorCode, Failed, Resolver
 
 MAX_URL_LENGTH = 8192
+DEFAULT_DNS_TIMEOUT = 5.0
+URL_PLACEHOLDER = "[url maskerad]"
 _HOST_CHARS = re.compile(r"[a-z0-9_.-]+")
+_SHOWN_HOSTPORT = re.compile(r"[A-Za-z0-9_.:\[\]-]+")
+_MAX_SHOWN_PATH = 200
+
+
+def redact_url(url: object) -> str:
+    """URL i säkert visningsformat: schema, värd, port och sökväg. Aldrig användaruppgifter,
+    query eller fragment. Kan den inte tolkas ger den en fast platshållare (fail closed)."""
+    if not isinstance(url, str) or len(url) > MAX_URL_LENGTH:
+        return URL_PLACEHOLDER
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return URL_PLACEHOLDER
+    scheme = parts.scheme.lower()
+    hostport = parts.netloc.rpartition("@")[2]
+    path = parts.path[:_MAX_SHOWN_PATH]
+    if (
+        scheme not in ("http", "https")
+        or not _SHOWN_HOSTPORT.fullmatch(hostport)
+        or not (path.isascii() and path.isprintable())
+        or " " in path
+    ):
+        return URL_PLACEHOLDER
+    return f"{scheme}://{hostport}{path}"
+
+
+def resolve_with_timeout(
+    resolver: Resolver, host: str, port: int, timeout: float
+) -> list[str] | Failed:
+    """Kör resolvern i en egen tråd och ger upp efter `timeout`. getaddrinfo går inte att avbryta;
+    en hängd tråd är daemon och överges, men anroparen blockeras aldrig längre än `timeout`."""
+    if timeout <= 0:
+        return Failed("", ErrorCode.TIMEOUT, "totaltiden är slut före namnupplösning")
+    box: list[list[str] | BaseException] = []
+
+    def work() -> None:
+        try:
+            box.append(list(resolver(host, port)))
+        except BaseException as error:  # noqa: BLE001 - allt ska tolkas som nekat
+            box.append(error)
+
+    thread = threading.Thread(target=work, daemon=True, name="ssrf-dns")
+    thread.start()
+    thread.join(timeout)
+    if not box:
+        return Failed("", ErrorCode.TIMEOUT, "namnupplösningen tog för lång tid")
+    outcome = box[0]
+    if isinstance(outcome, BaseException):
+        return Failed("", ErrorCode.DNS_ERROR, f"{type(outcome).__name__} vid namnupplösning")
+    return outcome
 
 
 @dataclass(frozen=True)
@@ -43,13 +96,14 @@ class Target:
 
 
 def default_resolver(host: str, port: int) -> list[str]:
-    """getaddrinfo, TCP, i systemets ordning (RFC 6724). Blockerande; ingen egen timeout."""
+    """getaddrinfo, TCP, i systemets ordning (RFC 6724). Blockerande; tidsgränsen sätts av
+    validate_url via resolve_with_timeout."""
     infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
     return list(dict.fromkeys(str(info[4][0]) for info in infos))
 
 
 def _fail(url: str, code: ErrorCode, detail: str) -> Failed:
-    return Failed(url=url, code=code, detail=detail)
+    return Failed(url=redact_url(url), code=code, detail=detail)
 
 
 def _classify_host(url: str, netloc: str, hostname: str) -> tuple[str, bool] | Failed:
@@ -96,7 +150,7 @@ def _classify_host(url: str, netloc: str, hostname: str) -> tuple[str, bool] | F
 def check_url_syntax(url: str, allowed_ports: frozenset[int] | None = None) -> Target | Failed:
     """Allt som kan avgöras utan DNS. Returnerar Target utan adresser, eller Failed."""
     if not isinstance(url, str) or not url or len(url) > MAX_URL_LENGTH:
-        return _fail(str(url)[:200], ErrorCode.INVALID_URL, "tom, för lång eller ingen sträng")
+        return _fail(URL_PLACEHOLDER, ErrorCode.INVALID_URL, "tom, för lång eller ingen sträng")
     if "\\" in url or any(c <= " " or c == "\x7f" or c.isspace() for c in url):
         return _fail(url, ErrorCode.INVALID_URL, "blanksteg, styrtecken eller backslash")
     try:
@@ -132,8 +186,10 @@ def validate_url(
     url: str,
     resolver: Resolver = default_resolver,
     allowed_ports: frozenset[int] | None = None,
+    dns_timeout: float = DEFAULT_DNS_TIMEOUT,
 ) -> Target | Failed:
     """Validera URL och lös upp namnet *en* gång. Varje adress måste vara publik.
+    Namnupplösningen avbryts efter `dns_timeout` sekunder (felkod timeout).
 
     Anroparen ska ansluta till `Target.addresses` och aldrig lösa upp namnet igen.
     """
@@ -144,10 +200,10 @@ def validate_url(
         return Target(
             target.scheme, target.host, target.port, target.path_query, (target.host,), True
         )
-    try:
-        resolved = list(resolver(target.host, target.port))
-    except Exception as error:  # fail closed på allt
-        return _fail(url, ErrorCode.DNS_ERROR, f"{type(error).__name__} vid namnupplösning")
+    outcome = resolve_with_timeout(resolver, target.host, target.port, dns_timeout)
+    if isinstance(outcome, Failed):
+        return _fail(url, outcome.code, outcome.detail)
+    resolved = outcome
     addresses = tuple(dict.fromkeys(str(a) for a in resolved))
     if not addresses:
         return _fail(url, ErrorCode.DNS_EMPTY, "namnet gav inga adresser")

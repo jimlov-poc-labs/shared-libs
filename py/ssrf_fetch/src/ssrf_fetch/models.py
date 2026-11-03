@@ -55,7 +55,8 @@ class Fetched:
 
 @dataclass(frozen=True)
 class Failed:
-    """Hämtningen nekades eller misslyckades. `detail` innehåller aldrig hela URL:en."""
+    """Hämtningen nekades eller misslyckades. `url` är maskerad (inga användaruppgifter, query eller
+    fragment; trasig URL ger en fast platshållare) och `detail` innehåller aldrig URL:en."""
 
     url: str
     code: ErrorCode

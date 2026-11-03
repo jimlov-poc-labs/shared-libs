@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+import httpx
 import pytest
 
 from fakes import FakeClock, FakeDns, FakeTransport
@@ -25,6 +26,7 @@ from ssrf_fetch import (
     parse_robots,
     validate_url,
 )
+from ssrf_fetch.url import URL_PLACEHOLDER, redact_url
 
 PUB = "93.184.216.34"
 DNS = {"example.com": [PUB]}
@@ -301,6 +303,16 @@ class _Handler(BaseHTTPRequestHandler):
             time.sleep(1.5)
             self.send_response(200)
             self.end_headers()
+        elif self.path == "/drip":
+            # Ett huvudfält var 0,3 s: varje enskild läsning lyckas, men huvudet blir aldrig klart.
+            try:
+                self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+                for i in range(30):
+                    self.wfile.write(f"X-Drip-{i}: x\r\n".encode())
+                    self.wfile.flush()
+                    time.sleep(0.3)
+            except OSError:
+                pass
         elif self.path == "/gzip":
             self.send_response(200)
             self.send_header("Content-Encoding", "gzip")
@@ -418,3 +430,142 @@ def test_vantan_som_tar_slut_pa_totaltiden_ger_timeout() -> None:
     assert isinstance(fetcher.fetch("http://example.com/"), Fetched)
     assert _failed(fetcher.fetch("http://example.com/")).code is ErrorCode.TIMEOUT
     assert len(transport.seen) == 1
+
+
+# --- deadline gäller även svarshuvudet ------------------------------------------------
+
+
+def test_akta_socket_totaltid_galler_medan_svarshuvudet_droppas(local_server: int) -> None:
+    with _real(local_server, total_timeout=1.5, read_timeout=1.0) as fetcher:
+        start = time.perf_counter()
+        result = fetcher.fetch(f"http://pin.example:{local_server}/drip")
+        elapsed = time.perf_counter() - start
+    assert _failed(result).code is ErrorCode.TIMEOUT
+    assert elapsed < 4, elapsed  # utan deadline: ~9 s (30 x 0,3 s)
+
+
+# --- Failed.url maskeras ----------------------------------------------------------------
+
+_SECRETS = ("hunter2", "admin", "token=abc", "abc", "frag-secret")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://admin:hunter2@example.com/x?token=abc#frag-secret",
+        "http://admin:hunter2@127.0.0.1/x?token=abc#frag-secret",
+        "ftp://admin:hunter2@example.com/x?token=abc#frag-secret",
+        "http://admin:hunter2@nope.example/x?token=abc#frag-secret",
+        "http://example.com/x?token=abc#frag-secret",
+        "http://admin:hunter2@[::1/x?token=abc#frag-secret",
+        "http://admin:hunter2@exa mple.com/x?token=abc#frag-secret",
+        "http://admin:hunter2@example.com:99999999/x?token=abc#frag-secret",
+        "http://admin:hunter2@\\example.com/x?token=abc#frag-secret",
+        "http://admin:hunter2@%65xample.com/x?token=abc#frag-secret",
+    ],
+)
+def test_failed_url_innehaller_aldrig_userinfo_query_eller_fragment(url: str) -> None:
+    fetcher, _ = _fetcher({"http://example.com/x?token=abc": {"status": 500}})
+    result = _failed(fetcher.fetch(url))
+    for secret in _SECRETS:
+        assert secret not in repr(result), (secret, result)
+
+
+def test_failed_url_ar_maskerad_men_anvandbar() -> None:
+    fetcher, _ = _fetcher({})
+    result = _failed(fetcher.fetch("http://admin:hunter2@example.com/x?token=abc"))
+    assert result.url == "http://example.com/x"
+    assert redact_url("https://example.com:8443") == "https://example.com:8443"
+
+
+@pytest.mark.parametrize("url", ["http://[::1", "mailto:a@b", "", "http://a b/", 12345, None])
+def test_redact_url_trasig_indata_ger_platshallare(url: Any) -> None:
+    assert redact_url(url) == URL_PLACEHOLDER
+
+
+def test_failed_url_vid_internt_fel_och_omdirigering_ar_maskerad() -> None:
+    class Boom(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            raise RuntimeError("hunter2")
+
+    fetcher = SafeFetcher(resolver=FakeDns(DNS), transport=Boom(), clock=FakeClock())
+    result = _failed(fetcher.fetch("http://example.com/x?token=abc"))
+    assert result.code is ErrorCode.INTERNAL_ERROR and "abc" not in repr(result)
+    fetcher, _ = _fetcher(
+        {"http://example.com/r?token=abc": {"status": 302, "headers": {"location": "/r?token=abc"}}}
+    )
+    result = _failed(fetcher.fetch("http://example.com/r?token=abc"))
+    assert result.code is ErrorCode.TOO_MANY_REDIRECTS and "abc" not in repr(result)
+
+
+# --- DNS har tidsgräns ------------------------------------------------------------------
+
+
+def test_langsam_resolver_ger_timeout_inom_totaltiden() -> None:
+    release = threading.Event()
+
+    def hanging(host: str, port: int) -> list[str]:
+        release.wait(10)
+        return [PUB]
+
+    fetcher = SafeFetcher(
+        FetchConfig(total_timeout=0.5), resolver=hanging, transport=FakeTransport({})
+    )
+    try:
+        start = time.perf_counter()
+        result = fetcher.fetch("http://example.com/")
+        elapsed = time.perf_counter() - start
+    finally:
+        release.set()
+    assert _failed(result).code is ErrorCode.TIMEOUT
+    assert elapsed < 3, elapsed
+
+
+def test_validate_url_dns_timeout_och_utgangen_tid() -> None:
+    release = threading.Event()
+
+    def hanging(host: str, port: int) -> list[str]:
+        release.wait(10)
+        return [PUB]
+
+    try:
+        slow = validate_url("http://example.com/", hanging, dns_timeout=0.2)
+        expired = validate_url("http://example.com/", FakeDns(DNS), dns_timeout=0)
+    finally:
+        release.set()
+    assert isinstance(slow, Failed) and slow.code is ErrorCode.TIMEOUT
+    assert isinstance(expired, Failed) and expired.code is ErrorCode.TIMEOUT
+
+
+# --- Content-Length strikt ASCII ----------------------------------------------------------
+
+
+def test_content_length_med_unicodesiffra_ger_tydlig_felkod() -> None:
+    fetcher, _ = _fetcher(
+        {
+            "http://example.com/": {
+                "status": 200,
+                "headers": [(b"content-length", "\u00b2".encode())],
+            }
+        }
+    )
+    assert _failed(fetcher.fetch("http://example.com/")).code is ErrorCode.NETWORK_ERROR
+
+
+def test_content_length_med_tusentals_siffror_ar_for_stor_inte_internt_fel() -> None:
+    fetcher, _ = _fetcher(
+        {"http://example.com/": {"status": 200, "headers": {"content-length": "9" * 5000}}}
+    )
+    assert _failed(fetcher.fetch("http://example.com/")).code is ErrorCode.TOO_LARGE
+
+
+def test_validate_url_maskerar_failed_url_direkt() -> None:
+    for url in (
+        "http://admin:hunter2@example.com/x?token=abc#frag-secret",
+        "http://admin:hunter2@127.0.0.1/x?token=abc",
+        "http://admin:hunter2@[::1/x?token=abc",
+    ):
+        result = validate_url(url, FakeDns(DNS))
+        assert isinstance(result, Failed)
+        for secret in _SECRETS:
+            assert secret not in repr(result)

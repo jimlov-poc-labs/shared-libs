@@ -8,6 +8,7 @@ ingen automatisk omdirigering, ingen avkodning av innehåll.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -17,6 +18,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
+from ssrf_fetch.deadline import DeadlineBackend, build_transport
 from ssrf_fetch.models import (
     ErrorCode,
     Failed,
@@ -27,8 +29,10 @@ from ssrf_fetch.models import (
 )
 from ssrf_fetch.ratelimit import HostLimiter
 from ssrf_fetch.robots import ALLOW_ALL, RobotsCache, RobotsRules, parse_robots
-from ssrf_fetch.url import Target, default_resolver, validate_url
+from ssrf_fetch.url import Target, default_resolver, redact_url, validate_url
 
+_ASCII_DIGITS = re.compile(r"[0-9]+")
+_MAX_LENGTH_DIGITS = 18  # längre tal är över varje tak; int() på tusentals siffror är dyrt
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
@@ -60,13 +64,11 @@ class SafeFetcher:
         self._config = config or FetchConfig()
         self._resolver = resolver
         self._owns_transport = transport is None
-        self._transport: httpx.BaseTransport = transport or httpx.HTTPTransport(
-            # Inga keep-alive-anslutningar: en TLS-session verifierad för ett namn får
-            # inte återanvändas för ett annat namn på samma IP.
-            limits=httpx.Limits(max_keepalive_connections=0),
-            retries=0,
-        )
         self._clock = clock
+        self._backend = DeadlineBackend(clock)
+        # Inga keep-alive-anslutningar: en TLS-session verifierad för ett namn får
+        # inte återanvändas för ett annat namn på samma IP.
+        self._transport: httpx.BaseTransport = transport or build_transport(self._backend)
         self._sleep = sleep
         self._robots = robots
         self._robots_cache: RobotsCache | None = None
@@ -107,7 +109,7 @@ class SafeFetcher:
                 use_robots=self._robots is not None,
             )
         except Exception as error:  # fail closed: oväntat fel är nekat, inte "klart"
-            return Failed(url, ErrorCode.INTERNAL_ERROR, type(error).__name__)
+            return Failed(redact_url(url), ErrorCode.INTERNAL_ERROR, type(error).__name__)
 
     # --- kärnan -----------------------------------------------------------------
 
@@ -123,30 +125,36 @@ class SafeFetcher:
     ) -> Fetched | Failed:
         cfg = self._config
         current = url
+        shown = redact_url(url)  # allt som lämnar biblioteket visar bara den maskerade URL:en
         for hop in range(cfg.max_redirects + 1):
-            target = validate_url(current, self._resolver, cfg.allowed_ports)
+            target = validate_url(
+                current,
+                self._resolver,
+                cfg.allowed_ports,
+                dns_timeout=deadline - self._clock(),
+            )
             if isinstance(target, Failed):
-                return replace(target, url=url)
+                return replace(target, url=shown)
             if use_robots:
                 denial = self._robots_denial(target, deadline)
                 if denial is not None:
-                    return replace(denial, url=url)
+                    return replace(denial, url=shown)
             outcome = self._hop(target, deadline, max_bytes, truncate, content_types)
             if isinstance(outcome, Failed):
-                return replace(outcome, url=url)
+                return replace(outcome, url=shown)
             if isinstance(outcome, Fetched):
                 return replace(outcome, url=url, final_url=current, redirects=hop)
             if hop >= cfg.max_redirects:
-                return Failed(url, ErrorCode.TOO_MANY_REDIRECTS, f"fler än {cfg.max_redirects}")
+                return Failed(shown, ErrorCode.TOO_MANY_REDIRECTS, f"fler än {cfg.max_redirects}")
             try:
                 following = urljoin(current, outcome.location)
                 next_scheme = urlsplit(following).scheme.lower()
             except ValueError:
-                return Failed(url, ErrorCode.BAD_REDIRECT, "Location kunde inte tolkas")
+                return Failed(shown, ErrorCode.BAD_REDIRECT, "Location kunde inte tolkas")
             if target.scheme == "https" and next_scheme == "http":
-                return Failed(url, ErrorCode.REDIRECT_DOWNGRADE, "https till http nekas")
+                return Failed(shown, ErrorCode.REDIRECT_DOWNGRADE, "https till http nekas")
             current = following
-        return Failed(url, ErrorCode.TOO_MANY_REDIRECTS, f"fler än {cfg.max_redirects}")
+        return Failed(shown, ErrorCode.TOO_MANY_REDIRECTS, f"fler än {cfg.max_redirects}")
 
     def _hop(
         self,
@@ -219,8 +227,9 @@ class SafeFetcher:
 
         response: httpx.Response | None = None
         try:
-            response = self._transport.handle_request(request)
-            return self._read(response, deadline, max_bytes, truncate, content_types)
+            with self._backend.scope(deadline):  # absolut deadline även för svarshuvudet
+                response = self._transport.handle_request(request)
+                return self._read(response, deadline, max_bytes, truncate, content_types)
         except (httpx.ConnectTimeout, httpx.ConnectError) as error:
             return _ConnectFailure(type(error).__name__)
         except httpx.TimeoutException as error:
@@ -254,9 +263,14 @@ class SafeFetcher:
         content_type = response.headers.get("content-type", "")
         if content_types is not None and not _type_allowed(content_type, content_types):
             return Failed("", ErrorCode.CONTENT_TYPE_NOT_ALLOWED, "innehållstypen nekas", status)
-        declared = response.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > max_bytes and not truncate:
-            return Failed("", ErrorCode.TOO_LARGE, "Content-Length över taket", status)
+        declared = response.headers.get("content-length", "").strip()
+        if declared:
+            # Strikt ASCII: str.isdigit() godtar t.ex. "²" och int() kastar då.
+            if not _ASCII_DIGITS.fullmatch(declared):
+                return Failed("", ErrorCode.NETWORK_ERROR, "ogiltig Content-Length", status)
+            too_big = len(declared) > _MAX_LENGTH_DIGITS or int(declared) > max_bytes
+            if too_big and not truncate:
+                return Failed("", ErrorCode.TOO_LARGE, "Content-Length över taket", status)
 
         body = bytearray()
         truncated = False

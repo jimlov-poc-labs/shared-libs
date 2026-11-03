@@ -41,3 +41,15 @@ rate_limited, internal_error.
 - Totaltid plus tid per steg; `Accept-Encoding: identity`, komprimerade svar nekas.
 - robots: 404/410 tillåter, övriga 4xx tillåter om inte `strict_client_errors`, 429/5xx/
   nätverksfel/timeout nekar (`robots_unavailable`); fel cachas inte; regeltak ger nek-allt.
+- `total_timeout` är en absolut deadline (monotonic klocka) för hela hämtningen: namnupplösning,
+  anslutning, TLS, läsning av svarshuvud och body. Läsgränsen får aldrig nollställas per byte.
+  Slut tid ger `timeout`. Namnupplösningen körs med tidsgräns (`timeout`); en hängd getaddrinfo
+  överges i en daemon-tråd men blockerar aldrig anroparen.
+- `Failed.url` är maskerad: bara schema, värd, port och sökväg (högst 200 tecken). Aldrig
+  användaruppgifter, query eller fragment. Går URL:en inte att tolka är den den fasta texten
+  `[url maskerad]`. Detsamma gäller varje felsträng och loggrad. `Fetched.url` är oförändrad.
+- Content-Length måste vara strikt ASCII-siffror (`[0-9]+`); annat ger `network_error`, och
+  tal med över 18 siffror räknas som över taket (`too_large`) utan att tolkas.
+- Hastighetsgränsen (`HostLimiter`) är per normaliserat värdnamn, inte per IP-adress: två namn
+  som pekar på samma server har var sin gräns. Vill man begränsa per server får anroparen
+  lägga en egen gräns ovanpå.

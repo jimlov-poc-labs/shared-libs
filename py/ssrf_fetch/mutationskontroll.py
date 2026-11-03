@@ -48,7 +48,11 @@ MUTANTER: list[tuple[str, str, str, str, int]] = [
     (
         "omdirigeringshopp valideras inte",
         "fetcher.py",
-        "            target = validate_url(current, self._resolver, cfg.allowed_ports)\n",
+        "            target = validate_url(\n                current,\n"
+        "                self._resolver,\n"
+        "                cfg.allowed_ports,\n"
+        "                dns_timeout=deadline - self._clock(),\n"
+        "            )\n",
         "            target = validate_url(current, self._resolver, cfg.allowed_ports) if hop == 0 "
         "else Target(urlsplit(current).scheme, urlsplit(current).hostname or '', "
         "urlsplit(current).port or 80, '/', (urlsplit(current).hostname or '',), True)\n",
@@ -78,8 +82,8 @@ MUTANTER: list[tuple[str, str, str, str, int]] = [
     (
         "storlekstaket avstängt (Content-Length)",
         "fetcher.py",
-        "        if declared.isdigit() and int(declared) > max_bytes and not truncate:",
-        "        if False:",
+        "            if too_big and not truncate:",
+        "            if False:",
         1,
     ),
     (
@@ -192,6 +196,62 @@ MUTANTER: list[tuple[str, str, str, str, int]] = [
         "fetcher.py",
         "            if self._clock() >= deadline:",
         "            if False:",
+        1,
+    ),
+    (
+        "absolut deadline avstängd under svarshuvudet",
+        "fetcher.py",
+        "            with self._backend.scope(deadline):",
+        '            with self._backend.scope(float("inf")):',
+        1,
+    ),
+    (
+        "Failed.url ej maskerad i url.py",
+        "url.py",
+        "    return Failed(url=redact_url(url), code=code, detail=detail)",
+        "    return Failed(url=url, code=code, detail=detail)",
+        1,
+    ),
+    (
+        "Failed.url ej maskerad i fetcher.py",
+        "fetcher.py",
+        "        shown = redact_url(url)  # allt som",
+        "        shown = url  # allt som",
+        1,
+    ),
+    (
+        "Failed.url ej maskerad vid internt fel",
+        "fetcher.py",
+        "return Failed(redact_url(url), ErrorCode.INTERNAL_ERROR",
+        "return Failed(url, ErrorCode.INTERNAL_ERROR",
+        1,
+    ),
+    (
+        "redact_url godtar vilken värd som helst",
+        "url.py",
+        "or not _SHOWN_HOSTPORT.fullmatch(hostport)",
+        "or False",
+        1,
+    ),
+    (
+        "DNS utan tidsgräns",
+        "url.py",
+        "    thread.join(timeout)",
+        "    thread.join()",
+        1,
+    ),
+    (
+        "Content-Length: isdigit i stället för strikt ASCII",
+        "fetcher.py",
+        "            if not _ASCII_DIGITS.fullmatch(declared):",
+        "            if not declared.isdigit():",
+        1,
+    ),
+    (
+        "Content-Length: ingen längdspärr före int()",
+        "fetcher.py",
+        "len(declared) > _MAX_LENGTH_DIGITS or ",
+        "",
         1,
     ),
     (
