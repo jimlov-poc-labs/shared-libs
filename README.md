@@ -23,7 +23,7 @@ testfall bevisar samma beteende.
 ## Lägga till en förmåga
 
 1. Skriv `spec/<förmåga>/README.md` (kontrakt, felfall) och `vektorer.json` först.
-2. Kopiera `py/_exempel` och/eller `ts/_exempel` till `py/<förmåga>` / `ts/<förmåga>`; byt namn i `pyproject.toml` / `package.json`, sätt version `0.1.0`, ta bort `"private": true` om den ska konsumeras.
+2. Kopiera `py/_exempel` och/eller `ts/_exempel` till `py/<förmåga>` / `ts/<förmåga>`; byt namn i `pyproject.toml` / `package.json`, sätt version `0.1.0`, ta bort `"private": true` om den ska konsumeras. Behåll `"files": ["dist"]` så tarballen bara innehåller byggd kod.
 3. Låt testerna läsa vektorerna i `spec/`. Nya fall läggs i vektorfilen, inte bara i ett språk.
 4. Lägg katalogen i `.github/dependabot.yml`. Sonar och CI plockar upp paketet själva.
 5. Checka in `package-lock.json` (TypeScript); CI kör `npm ci`.
@@ -40,11 +40,27 @@ Python:
 (`requirements.txt` accepterar samma rad.) CI och deploy behöver läsrätt mot repot,
 t.ex. deploy key eller token.
 
-TypeScript: **npm saknar stöd för underkatalog i git-beroenden**, så motsvarigheten
-till raden ovan är inte löst och oprövad. Alternativ att välja mellan när första
-TS-förmågan kommer: (a) release-tillgång `.tgz` från `npm pack` per tagg, installerad
-via URL; (b) pnpm, som stöder `github:jimlov-poc-labs/shared-libs#proof-ts/v1.2.0&path:/ts/proof`.
-Beslut återstår.
+TypeScript: npm kan inte installera från en underkatalog i ett git-beroende, så
+TS-förmågor distribueras som färdigpaketerad `.tgz` bifogad på en GitHub Release
+(`release.yml` bygger den när taggen `<förmåga>-ts/vX.Y.Z` pushas). Konsumentens rad:
+
+    npm i https://github.com/jimlov-poc-labs/shared-libs/releases/download/<förmåga>-ts/vX.Y.Z/<paket>-X.Y.Z.tgz
+
+`<paket>` är paketnamnet utan `@` och med `/` ersatt av `-` (`@shared-libs/exempel`
+blir `shared-libs-exempel-0.0.0.tgz`). Releasen avvisas om taggens version inte
+matchar `package.json`. Python-taggar (`<förmåga>-py/vX.Y.Z`) ger bara en release med
+auto-genererade noter, ingen artefakt; Python pinnas på git-taggen enligt ovan.
+
+Privat repo (**ej provat**): nedladdning av release-tillgångar kräver autentisering,
+så en anonym `npm i <url>` ger 404. I CI behövs en token med läsrätt (`contents: read`
+på detta repo, t.ex. fine-grained PAT eller GitHub App-token) som skickas som
+`Authorization`-header; hur npm bäst får med headern (t.ex. förhämtning med
+`gh release download` och `npm i ./fil.tgz`) är inte validerat.
+
+Dependabot: uppdaterar inte URL-beroenden till tarballs och ser inte nya releaser.
+Nya versioner i konsumentrepona måste höjas manuellt (eller via eget skript);
+tillgängliga uppdateringar syns alltså inte automatiskt. Python-git-pinnar har samma
+begränsning i praktiken.
 
 ## Versionspolicy
 

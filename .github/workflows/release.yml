@@ -1,0 +1,83 @@
+name: release
+
+# Säkerhetsnotering: taggnamnet når steg bara via env:, aldrig interpolerat i run:.
+# Taggformat: <förmåga>-ts/vX.Y.Z (tarball bifogas) och <förmåga>-py/vX.Y.Z (bara noter).
+on:
+  push:
+    tags:
+      - "**-ts/v*"
+      - "**-py/v*"
+
+permissions: {}
+
+jobs:
+  ts:
+    name: Release ts
+    if: contains(github.ref_name, '-ts/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAGG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Tolka och validera tagg
+        id: tagg
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAGG" =~ ^([a-z0-9][a-z0-9_-]*)-ts/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Ogiltigt taggformat: förväntat <förmåga>-ts/vX.Y.Z"; exit 1
+          fi
+          formaga="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+          [ -d "ts/$formaga" ] || { echo "::error::ts/$formaga saknas"; exit 1; }
+          pkgver="$(node -p "require('./ts/$formaga/package.json').version")"
+          if [ "$pkgver" != "$version" ]; then
+            echo "::error::Taggen säger $version men package.json säger $pkgver"; exit 1
+          fi
+          echo "formaga=$formaga" >> "$GITHUB_OUTPUT"
+      - name: Installera, testa, bygg
+        working-directory: ts/${{ steps.tagg.outputs.formaga }}
+        run: |
+          npm ci
+          npm test
+          npm run build
+      - name: Paketera
+        id: pack
+        working-directory: ts/${{ steps.tagg.outputs.formaga }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ut"
+          npm pack --pack-destination "$RUNNER_TEMP/ut"
+          ls "$RUNNER_TEMP/ut"/*.tgz
+      - name: Skapa release med tarball
+        run: |
+          set -euo pipefail
+          gh release create "$TAGG" "$RUNNER_TEMP"/ut/*.tgz \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAGG" --generate-notes
+
+  py:
+    name: Release py
+    if: contains(github.ref_name, '-py/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAGG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validera tagg
+        run: |
+          set -euo pipefail
+          [[ "$TAGG" =~ ^[a-z0-9][a-z0-9_-]*-py/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Ogiltigt taggformat: förväntat <förmåga>-py/vX.Y.Z"; exit 1; }
+      - name: Skapa release (bara noter, ingen artefakt)
+        run: |
+          gh release create "$TAGG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --title "$TAGG" --generate-notes
