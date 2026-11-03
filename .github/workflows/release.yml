@@ -28,7 +28,6 @@ jobs:
       - name: Kräv att taggen ligger på main
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
             echo "::error::Taggen ligger inte på main"; exit 1; }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -86,7 +85,6 @@ jobs:
       - name: Kräv att taggen ligger på main
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
             echo "::error::Taggen ligger inte på main"; exit 1; }
       - name: Validera tagg
