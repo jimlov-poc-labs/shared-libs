@@ -5,6 +5,7 @@ updates:
   - package-ecosystem: pip
     directories:
       - "/py/_exempel"
+      - "/py/ssrf_fetch"
     schedule:
       interval: weekly
       day: monday
