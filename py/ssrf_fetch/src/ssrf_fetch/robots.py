@@ -87,45 +87,68 @@ def parse_robots(text: str, agent: str, max_rules: int = 10_000) -> RobotsRules:
     inte ut av `*`-gruppen. Flera grupper för samma agent slås ihop. Fler än `max_rules`
     regler ger DENY_ALL (fail closed).
     """
-    token = agent.lower()
-    named: list[_Rule] = []
-    star: list[_Rule] = []
-    named_seen = False
-    agents: list[str] = []
-    in_header = False
+    groups = _Groups(agent.lower())
     count = 0
-
     for raw in _LINE_SPLIT.split(text.removeprefix("﻿")):
-        line = raw.split("#", 1)[0].strip()
-        field, sep, value = line.partition(":")
-        if not sep:
+        parsed = _field_value(raw)
+        if parsed is None:
             continue
-        field = field.strip().lower()
-        value = value.strip()
+        field, value = parsed
         if field == "user-agent":
-            if not in_header:
-                agents = []
-                in_header = True
-            agents.append(value.lower())
-            named_seen = named_seen or value.lower() == token
+            groups.agent_line(value)
             continue
         if field not in ("allow", "disallow"):
             continue
-        in_header = False
-        if not value or len(value) > _MAX_PATTERN:
+        groups.in_header = False
+        rule = _make_rule(field, value)
+        if rule is None:
             continue  # tom Disallow = inget förbjudet; orimligt långt mönster ignoreras
         count += 1
         if count > max_rules:
             return DENY_ALL
-        anchored = value.endswith("$")
-        pattern = normalize_path(value[:-1] if anchored else value)
-        rule = _Rule(field == "allow", pattern, anchored, len(pattern) + anchored)
-        if token in agents:
-            named.append(rule)
-        elif "*" in agents:
-            star.append(rule)
+        groups.add(rule)
+    return RobotsRules(tuple(groups.named if groups.named_seen else groups.star))
 
-    return RobotsRules(tuple(named if named_seen else star))
+
+def _field_value(raw: str) -> tuple[str, str] | None:
+    line = raw.split("#", 1)[0].strip()
+    field, sep, value = line.partition(":")
+    if not sep:
+        return None
+    return field.strip().lower(), value.strip()
+
+
+def _make_rule(field: str, value: str) -> _Rule | None:
+    if not value or len(value) > _MAX_PATTERN:
+        return None
+    anchored = value.endswith("$")
+    pattern = normalize_path(value[:-1] if anchored else value)
+    return _Rule(field == "allow", pattern, anchored, len(pattern) + anchored)
+
+
+class _Groups:
+    """Tillstånd under tolkningen: vilka User-agent-rader som gäller för raderna som följer."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.named: list[_Rule] = []
+        self.star: list[_Rule] = []
+        self.named_seen = False
+        self.agents: list[str] = []
+        self.in_header = False
+
+    def agent_line(self, value: str) -> None:
+        if not self.in_header:
+            self.agents = []
+            self.in_header = True
+        self.agents.append(value.lower())
+        self.named_seen = self.named_seen or value.lower() == self.token
+
+    def add(self, rule: _Rule) -> None:
+        if self.token in self.agents:
+            self.named.append(rule)
+        elif "*" in self.agents:
+            self.star.append(rule)
 
 
 class RobotsCache:

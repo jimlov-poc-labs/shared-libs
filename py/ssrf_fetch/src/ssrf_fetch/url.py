@@ -7,7 +7,7 @@ import re
 import socket
 import threading
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from ssrf_fetch.address import (
     is_blocked_ip,
@@ -80,7 +80,7 @@ def resolve_with_timeout(
     def work() -> None:
         try:
             box.append(list(resolver(host, port)))
-        except BaseException as error:  # noqa: BLE001 - allt ska tolkas som nekat
+        except Exception as error:  # noqa: BLE001 - allt som resolvern kastar tolkas som nekat
             box.append(error)
         finally:
             slots.release()
@@ -133,19 +133,35 @@ def _fail(url: str, code: ErrorCode, detail: str) -> Failed:
     return Failed(url=redact_url(url), code=code, detail=detail)
 
 
+def _classify_ipv6(url: str, netloc: str, hostname: str) -> tuple[str, bool] | Failed:
+    # IPv6-literal; måste vara hakparentesad och en riktig IPv6-adress.
+    if not (netloc.rpartition("@")[2].startswith("[") and "]" in netloc):
+        return _fail(url, ErrorCode.INVALID_HOST, "ogiltig IPv6-literal")
+    try:
+        addr6 = ipaddress.IPv6Address(hostname)
+    except ValueError:
+        return _fail(url, ErrorCode.INVALID_HOST, "ogiltig IPv6-literal")
+    if is_blocked_ip(str(addr6)):
+        return _fail(url, ErrorCode.BLOCKED_IP, "adressen är inte publikt routbar")
+    return str(addr6), True
+
+
+def _classify_numeric(url: str, name: str) -> tuple[str, bool] | Failed:
+    # Numeriskt slut = IPv4-form (inet_aton-kompatibla klienter tolkar den så).
+    legacy = parse_legacy_ipv4(name)
+    if legacy is None:
+        return _fail(url, ErrorCode.INVALID_HOST, "ogiltig numerisk värd")
+    if is_blocked_ip(legacy):
+        return _fail(url, ErrorCode.BLOCKED_IP, "adressen är inte publikt routbar")
+    if not is_canonical_ipv4(name):
+        return _fail(url, ErrorCode.INVALID_HOST, "icke-kanonisk IPv4-form nekas")
+    return name, True
+
+
 def _classify_host(url: str, netloc: str, hostname: str) -> tuple[str, bool] | Failed:
     """(normaliserat värdnamn eller IP, är_ip_literal) eller Failed."""
     if "[" in netloc or ":" in hostname:
-        # IPv6-literal; måste vara hakparentesad och en riktig IPv6-adress.
-        if not (netloc.rpartition("@")[2].startswith("[") and "]" in netloc):
-            return _fail(url, ErrorCode.INVALID_HOST, "ogiltig IPv6-literal")
-        try:
-            addr6 = ipaddress.IPv6Address(hostname)
-        except ValueError:
-            return _fail(url, ErrorCode.INVALID_HOST, "ogiltig IPv6-literal")
-        if is_blocked_ip(str(addr6)):
-            return _fail(url, ErrorCode.BLOCKED_IP, "adressen är inte publikt routbar")
-        return str(addr6), True
+        return _classify_ipv6(url, netloc, hostname)
 
     name = hostname[:-1] if hostname.endswith(".") else hostname
     if not name:
@@ -158,15 +174,7 @@ def _classify_host(url: str, netloc: str, hostname: str) -> tuple[str, bool] | F
         return _fail(url, ErrorCode.INVALID_HOST, "ogiltiga tecken i värdnamnet")
 
     if is_numeric_label(name.rsplit(".", 1)[-1]):
-        # Numeriskt slut = IPv4-form (inet_aton-kompatibla klienter tolkar den så).
-        legacy = parse_legacy_ipv4(name)
-        if legacy is None:
-            return _fail(url, ErrorCode.INVALID_HOST, "ogiltig numerisk värd")
-        if is_blocked_ip(legacy):
-            return _fail(url, ErrorCode.BLOCKED_IP, "adressen är inte publikt routbar")
-        if not is_canonical_ipv4(name):
-            return _fail(url, ErrorCode.INVALID_HOST, "icke-kanonisk IPv4-form nekas")
-        return name, True
+        return _classify_numeric(url, name)
 
     labels = name.split(".")
     if name == "localhost" or labels[-1] == "localhost":
@@ -174,12 +182,16 @@ def _classify_host(url: str, netloc: str, hostname: str) -> tuple[str, bool] | F
     return name, False
 
 
-def check_url_syntax(url: str, allowed_ports: frozenset[int] | None = None) -> Target | Failed:
-    """Allt som kan avgöras utan DNS. Returnerar Target utan adresser, eller Failed."""
-    if not isinstance(url, str) or not url or len(url) > MAX_URL_LENGTH:
-        return _fail(URL_PLACEHOLDER, ErrorCode.INVALID_URL, "tom, för lång eller ingen sträng")
-    if "\\" in url or any(c <= " " or c == "\x7f" or c.isspace() for c in url):
-        return _fail(url, ErrorCode.INVALID_URL, "blanksteg, styrtecken eller backslash")
+def _effective_port(scheme: str, port: int | None) -> int:
+    if port is not None:
+        return port
+    return 443 if scheme == "https" else 80
+
+
+def _syntax_head(
+    url: str, allowed_ports: frozenset[int] | None
+) -> tuple[SplitResult, str, int] | Failed:
+    """Schema, användaruppgifter, värd och port kontrolleras: (delar, värdnamn, port)."""
     try:
         parts = urlsplit(url)
         port = parts.port
@@ -197,16 +209,29 @@ def check_url_syntax(url: str, allowed_ports: frozenset[int] | None = None) -> T
         return _fail(url, ErrorCode.INVALID_HOST, "procentkodad värd")
     if port == 0:
         return _fail(url, ErrorCode.INVALID_URL, "port 0")
-    effective_port = port if port is not None else (443 if scheme == "https" else 80)
+    effective_port = _effective_port(scheme, port)
     if allowed_ports is not None and effective_port not in allowed_ports:
         return _fail(url, ErrorCode.PORT_NOT_ALLOWED, f"porten {effective_port} är inte tillåten")
+    return parts, hostname, effective_port
+
+
+def check_url_syntax(url: str, allowed_ports: frozenset[int] | None = None) -> Target | Failed:
+    """Allt som kan avgöras utan DNS. Returnerar Target utan adresser, eller Failed."""
+    if not isinstance(url, str) or not url or len(url) > MAX_URL_LENGTH:
+        return _fail(URL_PLACEHOLDER, ErrorCode.INVALID_URL, "tom, för lång eller ingen sträng")
+    if "\\" in url or any(c <= " " or c == "\x7f" or c.isspace() for c in url):
+        return _fail(url, ErrorCode.INVALID_URL, "blanksteg, styrtecken eller backslash")
+    head = _syntax_head(url, allowed_ports)
+    if isinstance(head, Failed):
+        return head
+    parts, hostname, effective_port = head
     host = _classify_host(url, parts.netloc, hostname)
     if isinstance(host, Failed):
         return host
     path_query = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
     if not path_query.startswith("/"):
         return _fail(url, ErrorCode.INVALID_URL, "ogiltig sökväg")
-    return Target(scheme, host[0], effective_port, path_query, (), host[1])
+    return Target(parts.scheme.lower(), host[0], effective_port, path_query, (), host[1])
 
 
 def validate_url(
