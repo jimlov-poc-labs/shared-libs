@@ -13,7 +13,8 @@ permissions:
 jobs:
   sonarqube:
     name: SonarQube Scan
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # Dependabot-körningar får inga Actions-secrets (SONAR_TOKEN) och skulle bara ge 401; hoppas över.
+    if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

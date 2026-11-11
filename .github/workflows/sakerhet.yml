@@ -4,6 +4,10 @@ name: Säkerhet
 on:
   pull_request:
   push:
+    # Dependabot-grenar täcks av pull_request-körningen; utan det körs allt två gånger.
+    branches-ignore: ['dependabot/**']
+    # Taggar skannades redan förut (push utan filter); behåll det.
+    tags: ['**']
 
 permissions:
   contents: read
