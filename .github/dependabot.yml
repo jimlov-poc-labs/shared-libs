@@ -1,4 +1,6 @@
-# Veckovisa beroendeuppdateringar; minor och patch grupperas till en PR per ekosystem.
+# Månadsvisa beroendeuppdateringar. Minor och patch grupperas till en PR per ekosystem;
+# major-hopp ignoreras och tas medvetet ett i taget. GitHub Actions kommer som en gruppad
+# PR per månad, major-hopp inkluderade. Säkerhetsuppdateringar styrs inte av ignore-regeln.
 # Lägg till ny katalog här när en förmåga skapas.
 version: 2
 updates:
@@ -7,27 +9,40 @@ updates:
       - "/py/_exempel"
       - "/py/ssrf_fetch"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
+    open-pull-requests-limit: 5
     groups:
       minor-and-patch:
-        update-types: [minor, patch]
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: npm
     directories:
       - "/ts/_exempel"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
+    open-pull-requests-limit: 5
     groups:
       minor-and-patch:
-        update-types: [minor, patch]
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
+    open-pull-requests-limit: 5
     groups:
-      minor-and-patch:
-        update-types: [minor, patch]
+      actions:
+        patterns:
+          - "*"
