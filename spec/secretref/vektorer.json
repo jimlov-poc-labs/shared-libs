@@ -1,0 +1,66 @@
+{
+ "forman": "secretref",
+ "version": 1,
+ "beskrivning": "Delat kontrakt för secretref. Avsnitt: prefix_parsning (en *_ref-sträng -> vilket schema den klassas som, utan att kräva riktig miljö/filsystem) och krockdetektion (en lista nyckel/värde-par -> kolliderar en platt nyckel med en *_ref-nyckels mål-namn). resolve()/load_yaml()s fulla sidoeffektsflöde (riktig env/filsystem) testas INTE här, se README.md i denna mapp för varför.",
+
+ "prefix_parsning": [
+  {"namn": "env-prefix", "ref": "env:FOO", "klass": "env", "rest": "FOO"},
+  {"namn": "bar namn utan prefix", "ref": "FOO", "klass": "env", "rest": "FOO"},
+  {"namn": "bara forsta kolon delar", "ref": "env:A:B", "klass": "env", "rest": "A:B"},
+  {"namn": "env: med tomt rest-fallback", "ref": "env:", "klass": "env", "rest": "env:"},
+  {"namn": "file: med tomt rest-fallback", "ref": "file:", "klass": "env", "rest": "file:"},
+  {"namn": "vault: med tomt rest-fallback blir env, inte not_wired", "ref": "vault:", "klass": "env", "rest": "vault:"},
+  {"namn": "kms: med tomt rest-fallback blir env, inte not_wired", "ref": "kms:", "klass": "env", "rest": "kms:"},
+  {"namn": "tomt schema", "ref": ":foo", "klass": "unknown", "rest": "foo"},
+  {"namn": "skiftlage spelar roll", "ref": "ENV:FOO", "klass": "unknown", "rest": "FOO"},
+  {"namn": "file-schema (klassning bara, inget filsystem)", "ref": "file:/tmp/does-not-matter", "klass": "file", "rest": "/tmp/does-not-matter"},
+  {"namn": "vault-schema erkant men ej inkopplat", "ref": "vault:x#y", "klass": "not_wired", "rest": "x#y"},
+  {"namn": "kms-schema erkant men ej inkopplat", "ref": "kms:abc", "klass": "not_wired", "rest": "abc"},
+  {"namn": "okant schema", "ref": "ldap:ignored", "klass": "unknown", "rest": "ignored"},
+  {"namn": "okant schema med kolon i resten", "ref": "ldap:a:b:c", "klass": "unknown", "rest": "a:b:c"}
+ ],
+
+ "krockdetektion": [
+  {
+   "namn": "platt nyckel efter _ref-nyckel kolliderar",
+   "nycklar": [["api_key_ref", "env:X"], ["api_key", "plain"]],
+   "kolliderar": true
+  },
+  {
+   "namn": "platt nyckel fore _ref-nyckel kolliderar (ordning spelar ingen roll)",
+   "nycklar": [["api_key", "plain"], ["api_key_ref", "env:X"]],
+   "kolliderar": true
+  },
+  {
+   "namn": "_ref_ref kolliderar med _ref (ordning 1)",
+   "nycklar": [["token_ref_ref", "env:A"], ["token_ref", "env:B"]],
+   "kolliderar": true
+  },
+  {
+   "namn": "_ref_ref kolliderar med _ref (ordning 2)",
+   "nycklar": [["token_ref", "env:B"], ["token_ref_ref", "env:A"]],
+   "kolliderar": true
+  },
+  {
+   "namn": "nyckeln ar exakt suffixet, undantagen fran _ref-tolkning",
+   "nycklar": [["_ref", "env:X"]],
+   "kolliderar": false
+  },
+  {
+   "namn": "egen suffix hedras och kolliderar inte",
+   "nycklar": [["token__secret", "env:X"]],
+   "suffix": "__secret",
+   "kolliderar": false
+  },
+  {
+   "namn": "krock pa en nastlad niva",
+   "nycklar": [["oauth", [["secret_ref", "env:X"], ["secret", "plain"]]]],
+   "kolliderar": true
+  },
+  {
+   "namn": "rent fall utan krock, allt loses",
+   "nycklar": [["a_ref", "env:A"], ["b", "plain"]],
+   "kolliderar": false
+  }
+ ]
+}
