@@ -47,13 +47,6 @@ def test_prefix_parsning(fall: dict[str, Any]) -> None:
         with pytest.raises(SecretRefError) as exc_info:
             resolve(ref, env={})
         assert not isinstance(exc_info.value, BackendNotWired)
-    elif klass == "file":
-        with pytest.raises(SecretRefError) as exc_info:
-            resolve(ref, env={})
-        assert not isinstance(exc_info.value, BackendNotWired)
-        # Diagnostisk kontroll av tolkningen (se spec-README), inte en fryst
-        # felsträng: den extraherade "rest"-delen måste synas i felet.
-        assert rest in str(exc_info.value)
     else:  # pragma: no cover - fail closed on an unrecognised vector shape
         pytest.fail(f"okänd klass i vektorfilen: {klass!r}")
 

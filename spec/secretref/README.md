@@ -59,11 +59,39 @@ closed on an unwired backend instead of getting an uncaught crash, while a calle
 checks for `NotImplementedError` specifically (e.g. to say "not built yet" vs. "bad
 input") can still do so.
 
+## Säkerhetsregler
+
+- **Fail closed.** A missing, empty, or unresolvable `*_ref` raises `SecretRefError`
+  (or `BackendNotWired` for the two unwired backends). There is no code path that
+  returns `None`/`""` for a broken reference — only `resolve_optional()` treats a truly
+  *absent* reference (`None` or `""`) as "not configured"; a present-but-broken one
+  still raises even through that function.
+- **Never logs or prints a resolved value.** No `logging`, `print`, or value
+  interpolation into an exception message anywhere in this package. Error messages name
+  the *reference* (e.g. `env:GOOGLE_CLIENT_SECRET`) or the scheme, never the secret.
+  `test_resolve_never_prints_or_logs_a_resolved_value` in `test_refs.py` enforces this;
+  a port must carry an equivalent test.
+- **Config loading fails closed too.** `load_yaml()` raises on a missing file by
+  default; `required=False` is only for a genuinely optional overlay (e.g. a local dev
+  override), never a service's primary config file.
+- **`*_ref` fields must NEVER contain plaintext.** If one does by misconfiguration
+  (e.g. someone pastes the actual secret into `password_ref` instead of
+  `env:PASSWORD`), the unresolved string is echoed verbatim in the resulting
+  `SecretRefError` message (e.g. `secret ref not set in environment: <that string>`),
+  and it also survives into `resolve_refs_in`'s output because the original `*_ref`
+  key is kept alongside the resolved one. That exception/output can reach stderr,
+  application logs, or a debug dump via caller code this library does not control.
+  There is no way to tell "this is a broken reference string" apart from "this happens
+  to be a secret" from inside the library, so it cannot detect or guard against this —
+  the field must simply never hold plaintext in the first place. This is a known,
+  accepted limitation (confirmed across three review rounds on the original code in
+  portis), not something the move introduced or is expected to fix.
+
 ## Avdelningar i vektorer.json
 
 - `prefix_parsning`: `{ref, klass, rest}`. Given a `*_ref` string, which scheme it is
   classified into and what the "rest" portion (the part after the first `:`) is.
-  `klass` is one of `env`, `file`, `not_wired`, `unknown`. This is the one part of
+  `klass` is one of `env`, `not_wired`, `unknown`. This is the one part of
   `resolve()`'s behaviour that is a genuinely pure function of the input string: it
   does not touch the environment or the filesystem to determine *which branch* a ref
   takes. The vectors prove classification by observable outcome without needing real
@@ -75,17 +103,15 @@ input") can still do so.
     signal, no message inspection needed.
   - `unknown` vectors assert a plain `SecretRefError` is raised that is **not**
     `BackendNotWired`.
-  - `file` vectors are given a path guaranteed not to exist, so no real filesystem
-    state is created or needed by the test; they also raise a plain `SecretRefError`
-    (the same type `unknown` raises), so the test additionally confirms the extracted
-    `rest` appears in the failure to tell the two apart. That is a diagnostic check on
-    the parsing result, not a frozen message-string contract: a port only has to prove
-    "this call used the value *after* the first colon", by whatever means fits its
-    own idioms.
-  - Beyond that, parsing is **not** keyed to any particular exception message text —
-    messages are not a cross-language contract here (unlike ssrf_fetch's stable error
-    codes, secretref has no error-code enum). Only the exception *type* and, where
+  - Parsing is **not** keyed to any particular exception message text — messages are
+    not a cross-language contract here (unlike ssrf_fetch's stable error codes,
+    secretref has no error-code enum). Only the exception *type* and, where
     applicable, the *resolved value*, are the actual contract.
+  - `file:` classification is deliberately **not** vectorized here, even though it is
+    conceptually the same parsing step: proving it needs a real filesystem check
+    (`Path.is_file()`), which is a side effect, not a pure function of the input
+    string. It stays a `test_refs.py` pytest case (`TestFileScheme`), alongside the
+    rest of `file:`'s actual-file-content behaviour.
   - Several entries exist specifically to pin down surprising-but-real edge cases of
     `ref.partition(":")`-based parsing, so a port reproduces them rather than "fixing"
     them: only the **first** colon splits (`"env:A:B"` → rest `"A:B"`); an empty rest
