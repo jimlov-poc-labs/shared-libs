@@ -2,9 +2,9 @@
 
 Extracted from the Memaix gateway's `config.py` (memaix/gateway/src/memaix_gateway/config.py,
 see memaix/docs/SECRETS.md), which is the most mature pattern of this kind in the
-jimlov-poc-labs portfolio. This library carries the same contract into Portis so the
-family's five services (harvester, inbox, evidence, gate, smtp-guard, ...) can share one
-secret-reference resolver instead of five hand-rolled ones.
+jimlov-poc-labs portfolio. This library carries the same contract portfolio-wide via
+shared-libs, so any Python service can share one secret-reference resolver instead of
+hand-rolling its own.
 
 Contract (unchanged from Memaix):
     A `*_ref` field in YAML config is a REFERENCE, never a value. It is resolved by prefix:
